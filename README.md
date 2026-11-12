@@ -1,65 +1,73 @@
-# En-Masse (prototype)
+# En-Masse
 
-**En**abling **M**ulti-**A**gent **S**ynchronization-**S**pace **E**xploration.
+**En**abling **M**ulti-**A**gent **S**ynchronization-**S**pace **E**xploration
 
-A prototype simulator for exploring synchronization policies for multi-agent
-execution, from conservative to optimistic.
+A framework for exploring synchronization policies for multi-agent LLM
+execution, from conservative (block until provably safe) to optimistic
+(speculate, checkpoint and roll back).
 
-**Status: early prototype.** It simulates agents; it does not run them. The
-workload model is synthetic and deliberately coarse. The numbers below show
-that the instrument works and that the expected trade-offs appear. They are not
+**Status: early prototype.** The repository currently contains a simulation
+engine, six policies and a policy-independent checker. It simulates agents and
+does not run them. Workloads are synthetic. The numbers below show that the
+instrument works and that the expected trade-offs appear. They are not
 measurements of real LLM agents.
 
-This repository contains  a prototype for work in progress.  The larger project
-aims to create a unified framework for design space exploration of
-synchronization policies for multi agent execution. This prototype simulation
-framework is one part of the project, while the goal is to develop a unified
-synchronization model, a range of actual pluggable synchronization policies
-ranging from conservative to optimistic, the design space explorer along with a
-simulator and workflow models and experimental results.
+## Why
 
-## The idea in brief
+Agents that act concurrently on shared state (files, repositories, databases,
+deployed services, messages) need a synchronization policy. Existing
+multi-agent runtimes each implement one strategy and evaluate it on their own
+workloads. The best strategy depends on the workload: its contention, how
+precisely agents can declare what they will read and write, and its fraction of
+irreversible actions.
 
-Several agents work at the same time on shared state (files, tickets, a
-cluster). A run is correct if it is equivalent to running the agents one after
-another in a fixed order. A synchronization policy decides, each time an agent
-is about to take a step, whether to
+Parallel discrete-event simulation (PDES) has studied this design space for
+decades. En-Masse brings that body of work to agent execution, so that a user
+can compare policies for a given workflow in simulation before spending tokens
+on live agents.
 
-- **run** the step now and treat it as final,
-- run it **speculatively** (take a checkpoint; it may be rolled back), or
-- **wait**.
+## The model in brief
 
-The engine keeps a commit point for every agent. A step is *safe* when nothing
-that can still happen could invalidate it. Safe steps need no checkpoint, and
-their irreversible effects can be released at once. A policy only chooses what
-to do with steps that are not yet safe. This one interface expresses the whole
-range:
+Every agent action has a **virtual time** (its position in a reference serial
+order), an **effect class** (reversible, compensable or irreversible) and a
+**declared footprint** (a superset of what it may read and write).
+
+Each agent holds a **commit horizon**. A step is *safe* when no uncommitted
+step with an earlier virtual time can still conflict with its footprint.
+
+- A safe step runs irreversibly. It needs no checkpoint and its effects are
+  released at once.
+- For any other step, the **policy** decides. The step either waits, or runs
+  speculatively behind a checkpoint with its irreversible effects withheld.
+
+A policy is therefore a rule for advancing the horizon and bounding
+speculation. This one interface expresses the whole range:
 
 | Policy | Rule |
 |---|---|
-| `Serial` | one agent at a time (the reference) |
-| `Conservative` | run only safe steps |
-| `Hybrid(window=w)` | run safe steps; otherwise speculate, holding at most `w` unconfirmed steps; hold irreversible effects until safe |
+| `Serial` | One agent at a time (the reference) |
+| `Conservative` | Run only safe steps |
+| `Hybrid(window=w)` | Run safe steps. Otherwise speculate, holding at most `w` uncommitted steps. Hold irreversible effects until safe |
 | `gated_optimistic()` | `Hybrid` with an unbounded window |
-| `Optimistic` | always run; repair by rollback; irreversible effects are not held |
-| `Unsynchronized` | always run; no repair |
+| `Optimistic` | Always run and repair by rollback. Irreversible effects are not held |
+| `Unsynchronized` | Always run, with no repair |
 
-How much a conservative policy can run in parallel depends on how well agents
-declare, in advance, what they may write (their footprint). The workload
-generator has a knob for footprint quality.
+A **policy-independent checker** reads the execution trace alone and reports
+stale reads, reads of values from the future, and irreversible effects that
+were released and then rolled back. The same checker judges every policy.
 
-A **policy-independent checker** reads the execution trace and reports stale
-reads, reads of values from the future, and irreversible effects that were
-released and then rolled back. The same checker judges every policy.
-
-## Quick start
+## Install
 
 ```
+git clone git@github.com:en-masse-agents/en-masse.git
+cd en-masse
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -e ".[experiments,dev]"
 python -m pytest -q
-python experiments/run_sweeps.py
-python experiments/plot_figure.py
 ```
+
+## Quick start
 
 ```python
 import numpy as np
@@ -70,33 +78,48 @@ metrics, engine = simulate(tasks, Hybrid(window=2))
 print(metrics["speedup"], metrics["token_ratio"], check(engine))
 ```
 
+To reproduce the results and the figure:
+
+```
+python experiments/run_sweeps.py
+python experiments/plot_figure.py
+```
+
 ## First results
 
 ![results](results/figure_policies.png)
 
 Setting: 8 agents, 12 steps each, 12 shared objects, 10% of steps irreversible,
 200 random workloads per point, every policy on the same workloads. Shaded
-bands are 95% confidence intervals. "Contention" is the share of steps that
-touch shared state. In panel (b) the unsynchronized line lies under the
-conservative one at 1.0.
+bands are 95% confidence intervals. Contention is the share of steps that touch
+shared state. "Coarse footprints" means each agent declares 3 extra objects it
+does not use.
 
-What the figure shows:
+Coarse footprints, contention 0.3:
 
-1. **No policy wins everywhere.** At contention 0.3 with coarse footprints, the
-   conservative policy reaches 1.94x the serial speed at no extra token cost.
-   Gated optimistic execution reaches 2.87x and costs 1.23x the tokens. The
-   hybrid with a window of 2 sits between them (2.21x, 1.08x).
-2. **Footprint quality decides whether speculation pays** (panel c). With exact
+| Policy | Speedup over serial | Token cost | Violations per run |
+|---|---|---|---|
+| Conservative | 1.94x | 1.00x | 0 |
+| Hybrid, window 2 | 2.21x | 1.08x | 0 |
+| Gated optimistic | 2.87x | 1.23x | 0 |
+| Optimistic, not gated | 4.06x | 1.32x | 2.9 leaked irreversible effects |
+| Unsynchronized | 6.54x | 1.00x | 12.2 stale or future reads |
+
+What the results show:
+
+1. **The policies form a frontier and not a ranking.** Each step toward
+   optimism buys speed and costs tokens.
+2. **Footprint precision decides whether speculation pays.** With exact
    footprints the conservative policy already finds all the concurrency there
    is (3.99x), and speculation only adds cost. With coarse footprints,
-   speculation buys speed, and the window size selects a point on the curve.
-3. **Safety has a price, and the checker makes it visible.** Releasing
-   irreversible effects without gating is faster (4.06x at contention 0.3) but
-   leaks 2.9 irreversible effects per run, in 83% of runs. No synchronization
-   at all is fastest (6.5x) and produces 12 causality violations per run. The
-   conservative, hybrid and gated policies had zero violations in every run.
+   speculation buys speed, and the window selects a point on the curve.
+3. **The checker makes the price of unsafe speed visible.** Releasing
+   irreversible effects without gating is faster but leaks them in 83% of
+   runs. The conservative, hybrid and gated policies had no violation in any
+   run.
 
-The full safety table is in `results/summary.md`.
+The full safety table is in `results/summary.md`, and the raw sweeps are in
+`results/sweep_contention.csv` and `results/sweep_window.csv`.
 
 ## What is modelled, and what is not
 
@@ -105,9 +128,9 @@ irreversible effects, declared footprints, checkpoint cost, undo cost, rollback
 with cascades, and an optional discount for repairing instead of redoing.
 
 Not modelled yet: real agents and tools, nondeterministic re-execution, LLM
-serving capacity and rate limits, message passing between agents, human
-approval delays, failures, and calibration against real traces. These are the
-subject of the planned work.
+serving capacity and rate limits, messages between agents, human approval
+delays, failures, and calibration against real traces.
+
 
 ## Layout
 
@@ -121,14 +144,18 @@ tests/                  unit tests
 results/                CSV output, figure, safety summary
 ```
 
+## Citing
+
+If you use En-Masse, please cite it using the metadata in `CITATION.cff`
+(GitHub shows a "Cite this repository" button).
+
 ## License
 
 Code in this repository is licensed under the Apache License, Version 2.0 (see
 `LICENSE`). Documentation, course material and datasets released by the project
 are licensed under CC BY 4.0.
 
-## Author
-Neha Karanjkar (Assistant Professor, IIT Goa)
-https://nehakaranjkar.github.io
+## Contact
 
-
+Neha Karanjkar, Indian Institute of Technology Goa.
+<https://nehakaranjkar.github.io>

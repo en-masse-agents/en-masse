@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+type: software
+title: "En-Masse: Enabling Multi-Agent Synchronization-Space Exploration"
+abstract: >-
+  A framework for exploring synchronization policies for multi-agent LLM
+  execution, from conservative to optimistic. The current release is a
+  prototype simulation engine with six policies and a policy-independent
+  checker of causality and commit safety.
+authors:
+  - family-names: Karanjkar
+    given-names: Neha
+    affiliation: "Indian Institute of Technology Goa"
+    website: "https://nehakaranjkar.github.io"
+repository-code: "https://github.com/en-masse-agents/en-masse"
+url: "https://github.com/en-masse-agents/en-masse"
+license: Apache-2.0
+version: 0.0.1
+date-released: "2026-11-01"
+keywords:
+  - multi-agent systems
+  - agent synchronization
+  - parallel discrete-event simulation
+  - speculative execution
+  - rollback and recovery
+  - design-space exploration
